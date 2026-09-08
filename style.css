@@ -41,3 +41,23 @@ th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #e5e7eb;white-spa
   .home-actions{grid-template-columns:1fr}.login-row{align-items:stretch}.login-row .btn{width:100%}
   .link-box{align-items:stretch}.link-box input{min-width:0}.dynamic-qr{min-height:280px}
 }
+
+.btn-excel{background:#107c41;color:#fff}
+.stat-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:18px 0 26px}
+.stat-card{border:1px solid #e5e7eb;border-radius:14px;padding:16px;background:#fff}
+.stat-card span{display:block;font-size:13px;color:#6b7280;font-weight:800;margin-bottom:8px}
+.stat-card b{display:block;font-size:30px;line-height:1.1}
+.stat-card small{display:block;color:#9ca3af;margin-top:7px}
+.stat-card.primary{border-color:#bfdbfe;background:#eff6ff}.stat-card.primary b{color:#1d4ed8}
+.stat-card.warn{border-color:#fde68a;background:#fffbeb}.stat-card.warn b{color:#b45309}
+.stat-card.danger{border-color:#fecaca;background:#fef2f2}.stat-card.danger b{color:#b91c1c}
+.stats-heading{margin:26px 0 10px;font-size:17px}
+.rate-pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#ecfdf5;color:#047857;font-weight:850}
+.trend-list{display:grid;gap:9px;margin-top:10px}
+.trend-row{display:grid;grid-template-columns:105px minmax(120px,1fr) 110px 150px;align-items:center;gap:10px;font-size:13px}
+.trend-date{font-weight:750}.trend-track{height:13px;background:#e5e7eb;border-radius:999px;overflow:hidden}
+.trend-fill{height:100%;background:#2563eb;border-radius:999px}.trend-value{font-weight:800}.trend-meta{color:#6b7280}
+@media(max-width:720px){
+  .stat-cards{grid-template-columns:repeat(2,1fr)}
+  .trend-row{grid-template-columns:90px 1fr 85px}.trend-meta{grid-column:2/-1}
+}

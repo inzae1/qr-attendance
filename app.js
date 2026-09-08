@@ -238,22 +238,139 @@ async function renderKiosk(){
   }
 }
 
+function attendanceStatus(r){
+  return {
+    inStatus: r.check_in ? (hhmm(r.check_in) > "10:00" ? "지각" : "정상") : "미출근",
+    outStatus: r.check_out ? (hhmm(r.check_out) < "17:00" ? "조퇴" : "정상") : "미퇴근"
+  };
+}
+
+function buildStats(rows){
+  const total = rows.length;
+  const present = rows.filter(r=>r.check_in).length;
+  const normalIn = rows.filter(r=>r.check_in && hhmm(r.check_in) <= "10:00").length;
+  const late = rows.filter(r=>r.check_in && hhmm(r.check_in) > "10:00").length;
+  const absent = rows.filter(r=>!r.check_in).length;
+  const checkedOut = rows.filter(r=>r.check_out).length;
+  const early = rows.filter(r=>r.check_out && hhmm(r.check_out) < "17:00").length;
+  const normalOut = rows.filter(r=>r.check_out && hhmm(r.check_out) >= "17:00").length;
+  const missingOut = rows.filter(r=>r.check_in && !r.check_out).length;
+  const attendanceRate = total ? present / total : 0;
+
+  const byMemberMap = new Map();
+  const byDateMap = new Map();
+
+  for(const r of rows){
+    const st = attendanceStatus(r);
+    if(!byMemberMap.has(r.member_name)){
+      byMemberMap.set(r.member_name,{
+        name:r.member_name,total:0,present:0,normalIn:0,late:0,absent:0,
+        checkedOut:0,normalOut:0,early:0,missingOut:0,checkInMinutes:[]
+      });
+    }
+    const m=byMemberMap.get(r.member_name);
+    m.total++;
+    if(r.check_in){
+      m.present++;
+      const [h,mi]=hhmm(r.check_in).split(":").map(Number);
+      m.checkInMinutes.push(h*60+mi);
+      st.inStatus==="지각" ? m.late++ : m.normalIn++;
+    } else m.absent++;
+    if(r.check_out){
+      m.checkedOut++;
+      st.outStatus==="조퇴" ? m.early++ : m.normalOut++;
+    } else if(r.check_in) m.missingOut++;
+
+    if(!byDateMap.has(r.work_date)){
+      byDateMap.set(r.work_date,{date:r.work_date,total:0,present:0,normalIn:0,late:0,absent:0,early:0,missingOut:0});
+    }
+    const d=byDateMap.get(r.work_date);
+    d.total++;
+    if(r.check_in){d.present++;st.inStatus==="지각"?d.late++:d.normalIn++;} else d.absent++;
+    if(r.check_out && st.outStatus==="조퇴")d.early++;
+    if(r.check_in && !r.check_out)d.missingOut++;
+  }
+
+  const byMember=[...byMemberMap.values()].map(m=>{
+    const avg=m.checkInMinutes.length ? Math.round(m.checkInMinutes.reduce((a,b)=>a+b,0)/m.checkInMinutes.length) : null;
+    return {
+      ...m,
+      attendanceRate:m.total ? m.present/m.total : 0,
+      avgCheckIn:avg===null ? "-" : `${String(Math.floor(avg/60)).padStart(2,"0")}:${String(avg%60).padStart(2,"0")}`
+    };
+  }).sort((a,b)=>a.name.localeCompare(b.name,"ko"));
+
+  const byDate=[...byDateMap.values()].sort((a,b)=>a.date.localeCompare(b.date));
+  return {total,present,normalIn,late,absent,checkedOut,normalOut,early,missingOut,attendanceRate,byMember,byDate};
+}
+
 function downloadCsv(rows){
   const lines = [["날짜","이름","출근","출근상태","퇴근","퇴근상태"]];
   for(const r of rows){
-    lines.push([
-      r.work_date,r.member_name,
-      r.check_in?fmt(r.check_in):"",
-      r.check_in?(hhmm(r.check_in)>"10:00"?"지각":"정상"):"미출근",
-      r.check_out?fmt(r.check_out):"",
-      r.check_out?(hhmm(r.check_out)<"17:00"?"조퇴":"정상"):"미퇴근"
-    ]);
+    const st=attendanceStatus(r);
+    lines.push([r.work_date,r.member_name,r.check_in?fmt(r.check_in):"",st.inStatus,r.check_out?fmt(r.check_out):"",st.outStatus]);
   }
   const csv="\uFEFF"+lines.map(row=>row.map(v=>`"${String(v??"").replaceAll('"','""')}"`).join(",")).join("\r\n");
   const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"});
   const url=URL.createObjectURL(blob), a=document.createElement("a");
   a.href=url;a.download=`출결내역_${document.getElementById("fromDate").value}_${document.getElementById("toDate").value}.csv`;a.click();
   URL.revokeObjectURL(url);
+}
+
+function downloadXlsx(rows){
+  if(!window.XLSX) return alert("엑셀 모듈을 불러오지 못했습니다.");
+  const stats=buildStats(rows);
+  const wb=XLSX.utils.book_new();
+
+  const detail=rows.map(r=>{
+    const st=attendanceStatus(r);
+    return {
+      "날짜":r.work_date,"이름":r.member_name,
+      "출근":r.check_in?fmt(r.check_in):"","출근상태":st.inStatus,
+      "퇴근":r.check_out?fmt(r.check_out):"","퇴근상태":st.outStatus
+    };
+  });
+  const summary=[
+    ["항목","값"],
+    ["조회기간",`${document.getElementById("fromDate").value} ~ ${document.getElementById("toDate").value}`],
+    ["총 예정",stats.total],["출근",stats.present],["정상출근",stats.normalIn],
+    ["지각",stats.late],["미출근",stats.absent],["출석률",stats.attendanceRate],
+    ["정상퇴근",stats.normalOut],["조퇴",stats.early],["미퇴근",stats.missingOut]
+  ];
+  const members=stats.byMember.map(m=>({
+    "이름":m.name,"예정일":m.total,"출근":m.present,"정상출근":m.normalIn,"지각":m.late,
+    "미출근":m.absent,"출석률":m.attendanceRate,"평균출근":m.avgCheckIn,
+    "정상퇴근":m.normalOut,"조퇴":m.early,"미퇴근":m.missingOut
+  }));
+  const daily=stats.byDate.map(d=>({
+    "날짜":d.date,"예정":d.total,"출근":d.present,"정상출근":d.normalIn,
+    "지각":d.late,"미출근":d.absent,"조퇴":d.early,"미퇴근":d.missingOut,
+    "출석률":d.total?d.present/d.total:0
+  }));
+
+  const ws1=XLSX.utils.json_to_sheet(detail);
+  const ws2=XLSX.utils.aoa_to_sheet(summary);
+  const ws3=XLSX.utils.json_to_sheet(members);
+  const ws4=XLSX.utils.json_to_sheet(daily);
+
+  ws1["!cols"]=[{wch:12},{wch:14},{wch:23},{wch:12},{wch:23},{wch:12}];
+  ws2["!cols"]=[{wch:18},{wch:28}];
+  ws3["!cols"]=[{wch:14},{wch:10},{wch:10},{wch:12},{wch:10},{wch:10},{wch:12},{wch:12},{wch:12},{wch:10},{wch:10}];
+  ws4["!cols"]=[{wch:12},{wch:10},{wch:10},{wch:12},{wch:10},{wch:10},{wch:10},{wch:10},{wch:12}];
+
+  if(ws2["B8"]) ws2["B8"].z="0.0%";
+  for(let r=2;r<=members.length+1;r++){
+    const c=ws3[`G${r}`]; if(c)c.z="0.0%";
+  }
+  for(let r=2;r<=daily.length+1;r++){
+    const c=ws4[`I${r}`]; if(c)c.z="0.0%";
+  }
+
+  XLSX.utils.book_append_sheet(wb,ws1,"출결내역");
+  XLSX.utils.book_append_sheet(wb,ws2,"요약통계");
+  XLSX.utils.book_append_sheet(wb,ws3,"학생별통계");
+  XLSX.utils.book_append_sheet(wb,ws4,"일자별통계");
+  XLSX.writeFile(wb,`출결통계_${document.getElementById("fromDate").value}_${document.getElementById("toDate").value}.xlsx`);
 }
 
 async function renderAdmin(){
@@ -274,6 +391,7 @@ async function renderAdmin(){
         <button class="tab active" data-tab="today">오늘 출결</button>
         <button class="tab" data-tab="members">학생 관리</button>
         <button class="tab" data-tab="passkeys">Passkey</button>
+        <button class="tab" data-tab="stats">통계</button>
         <button class="tab" data-tab="history">전체 내역</button>
       </div>
 
@@ -300,6 +418,17 @@ async function renderAdmin(){
         <div id="passkeyResult"></div>
       </section>
 
+
+      <section id="tab-stats" class="tab-panel hidden">
+        <div class="section-head"><h2>출결 통계</h2></div>
+        <div class="range-row">
+          <div class="field"><label>시작일</label><input id="statsFromDate" type="date" value="${firstDayOfMonth()}"></div>
+          <div class="field"><label>종료일</label><input id="statsToDate" type="date" value="${today}"></div>
+          <button id="loadStats" class="btn btn-admin compact">통계 조회</button>
+        </div>
+        <div id="statsResult"></div>
+      </section>
+
       <section id="tab-history" class="tab-panel hidden">
         <div class="section-head"><h2>전체 출결 내역</h2></div>
         <div class="range-row">
@@ -307,6 +436,7 @@ async function renderAdmin(){
           <div class="field"><label>종료일</label><input id="toDate" type="date" value="${today}"></div>
           <button id="loadHistory" class="btn btn-admin compact">조회</button>
           <button id="downloadCsv" class="btn btn-secondary compact" disabled>CSV 다운로드</button>
+          <button id="downloadXlsx" class="btn btn-excel compact" disabled>Excel (.xlsx)</button>
         </div>
         <div id="historyResult"></div>
       </section>
@@ -388,6 +518,50 @@ async function renderAdmin(){
     }catch(e){el.innerHTML=`<div class="result error">${esc(e.message)}</div>`;}
   }
 
+
+  async function loadStats(){
+    const from=document.getElementById("statsFromDate").value;
+    const to=document.getElementById("statsToDate").value;
+    const el=document.getElementById("statsResult");
+    el.innerHTML='<div class="result">통계를 계산하는 중...</div>';
+    const {data,error}=await db.rpc("admin_attendance_range",{p_from:from,p_to:to,p_admin_pin:adminPin});
+    if(error){el.innerHTML=`<div class="result error">${esc(error.message)}</div>`;return;}
+    const stats=buildStats(data||[]);
+    const pct=n=>`${(n*100).toFixed(1)}%`;
+    const maxPresent=Math.max(1,...stats.byDate.map(d=>d.present));
+    el.innerHTML=`
+      <div class="stat-cards">
+        <div class="stat-card primary"><span>출석률</span><b>${pct(stats.attendanceRate)}</b><small>${stats.present} / ${stats.total}</small></div>
+        <div class="stat-card"><span>정상출근</span><b>${stats.normalIn}</b><small>10:00 이전</small></div>
+        <div class="stat-card warn"><span>지각</span><b>${stats.late}</b><small>${stats.present?pct(stats.late/stats.present):"0.0%"}</small></div>
+        <div class="stat-card danger"><span>미출근</span><b>${stats.absent}</b><small>${stats.total?pct(stats.absent/stats.total):"0.0%"}</small></div>
+        <div class="stat-card warn"><span>조퇴</span><b>${stats.early}</b><small>17:00 이전</small></div>
+        <div class="stat-card danger"><span>미퇴근</span><b>${stats.missingOut}</b><small>출근 후 퇴근 기록 없음</small></div>
+      </div>
+
+      <h3 class="stats-heading">학생별 통계</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>이름</th><th>출석률</th><th>출근</th><th>지각</th><th>미출근</th><th>평균 출근</th><th>조퇴</th><th>미퇴근</th></tr></thead>
+        <tbody>${stats.byMember.map(m=>`<tr>
+          <td><b>${esc(m.name)}</b></td>
+          <td><span class="rate-pill">${pct(m.attendanceRate)}</span></td>
+          <td>${m.present}/${m.total}</td><td>${m.late}</td><td>${m.absent}</td>
+          <td>${m.avgCheckIn}</td><td>${m.early}</td><td>${m.missingOut}</td>
+        </tr>`).join("")}</tbody>
+      </table></div>
+
+      <h3 class="stats-heading">일자별 출석 추이</h3>
+      <div class="trend-list">${stats.byDate.map(d=>{
+        const rate=d.total?d.present/d.total:0;
+        return `<div class="trend-row">
+          <div class="trend-date">${esc(d.date)}</div>
+          <div class="trend-track"><div class="trend-fill" style="width:${Math.max(2,rate*100)}%"></div></div>
+          <div class="trend-value">${d.present}/${d.total} · ${pct(rate)}</div>
+          <div class="trend-meta">지각 ${d.late} · 결석 ${d.absent}</div>
+        </div>`;
+      }).join("") || '<div class="result">조회 기간에 데이터가 없습니다.</div>'}</div>`;
+  }
+
   async function loadHistory(){
     const from=document.getElementById("fromDate").value,to=document.getElementById("toDate").value;
     const {data,error}=await db.rpc("admin_attendance_range",{p_from:from,p_to:to,p_admin_pin:adminPin});
@@ -398,6 +572,7 @@ async function renderAdmin(){
       historyRows.map(r=>`<tr><td>${esc(r.work_date)}</td><td>${esc(r.member_name)}</td><td>${fmtTime(r.check_in)}</td><td>${statusIn(r.check_in)}</td><td>${fmtTime(r.check_out)}</td><td>${statusOut(r.check_out)}</td></tr>`).join("")
     }</tbody></table></div>`;
     document.getElementById("downloadCsv").disabled=!historyRows.length;
+    document.getElementById("downloadXlsx").disabled=!historyRows.length;
   }
 
   document.getElementById("unlock").onclick=async()=>{
@@ -418,6 +593,7 @@ async function renderAdmin(){
     if(tab.dataset.tab==="today")await loadToday();
     if(tab.dataset.tab==="members")await loadMembers();
     if(tab.dataset.tab==="passkeys")await loadPasskeys();
+    if(tab.dataset.tab==="stats")await loadStats();
     if(tab.dataset.tab==="history")await loadHistory();
   });
   document.getElementById("todayDate").onchange=loadToday;
@@ -431,7 +607,9 @@ async function renderAdmin(){
     await loadMembers();
   };
   document.getElementById("loadHistory").onclick=loadHistory;
+  document.getElementById("loadStats").onclick=loadStats;
   document.getElementById("downloadCsv").onclick=()=>downloadCsv(historyRows);
+  document.getElementById("downloadXlsx").onclick=()=>downloadXlsx(historyRows);
 }
 
 function renderHome(){

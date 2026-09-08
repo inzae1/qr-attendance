@@ -19,3 +19,14 @@ https://inzae1.github.io/qr-attendance/?kiosk=1
 
 관리자
 https://inzae1.github.io/qr-attendance/?admin=1
+
+추가 관리자 기능
+- 기간별 출석 통계
+- 학생별 출석률 / 지각 / 결석 / 평균 출근시간 / 조퇴 / 미퇴근
+- 일자별 출석 추이
+- CSV 다운로드
+- Excel(.xlsx) 다운로드
+  - 출결내역
+  - 요약통계
+  - 학생별통계
+  - 일자별통계
