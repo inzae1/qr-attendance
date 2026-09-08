@@ -1,18 +1,27 @@
 const SUPABASE_URL = "https://wkjyavanphojvbutebgo.supabase.co";
 const SUPABASE_KEY = "sb_publishable_A1SUvzt-1hVpKN9hrnI6wQ_3oruWDnK";
+const EDGE_URL = `${SUPABASE_URL}/functions/v1/passkey-attendance`;
 const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 const params = new URLSearchParams(location.search);
-const mode = params.get("mode");
-const isAdmin = params.has("admin");
-const BASE_URL = `${location.origin}${location.pathname}`;
 
-function esc(v){
-  return String(v ?? "").replace(/[&<>"']/g, c => ({
-    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
-  }[c]));
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({
+  "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
+}[c]));
+
+function kstDate(){
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone:"Asia/Seoul",year:"numeric",month:"2-digit",day:"2-digit"
+  }).formatToParts(new Date()).map(x=>[x.type,x.value]));
+  return `${p.year}-${p.month}-${p.day}`;
 }
-
+function firstDayOfMonth(){ return `${kstDate().slice(0,7)}-01`; }
+function fmtTime(ts){
+  if(!ts) return "-";
+  return new Intl.DateTimeFormat("ko-KR",{
+    timeZone:"Asia/Seoul",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false
+  }).format(new Date(ts));
+}
 function fmt(ts){
   if(!ts) return "-";
   return new Intl.DateTimeFormat("ko-KR",{
@@ -20,162 +29,257 @@ function fmt(ts){
     hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false
   }).format(new Date(ts));
 }
-
-function fmtTime(ts){
-  if(!ts) return "-";
-  return new Intl.DateTimeFormat("ko-KR",{
-    timeZone:"Asia/Seoul",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false
-  }).format(new Date(ts));
-}
-
 function hhmm(ts){
   if(!ts) return "";
   return new Intl.DateTimeFormat("en-GB",{
     timeZone:"Asia/Seoul",hour:"2-digit",minute:"2-digit",hour12:false
   }).format(new Date(ts));
 }
-
 function statusIn(ts){
   if(!ts) return '<span class="status absent">미출근</span>';
-  return hhmm(ts) > "10:00"
-    ? '<span class="status late">지각</span>'
-    : '<span class="status normal">정상</span>';
+  return hhmm(ts) > "10:00" ? '<span class="status late">지각</span>' : '<span class="status normal">정상</span>';
 }
-
 function statusOut(ts){
   if(!ts) return '<span class="status absent">미퇴근</span>';
-  return hhmm(ts) < "17:00"
-    ? '<span class="status early">조퇴</span>'
-    : '<span class="status normal">정상</span>';
+  return hhmm(ts) < "17:00" ? '<span class="status early">조퇴</span>' : '<span class="status normal">정상</span>';
 }
 
-function kstDate(d = new Date()){
-  const parts = new Intl.DateTimeFormat("en-US",{
-    timeZone:"Asia/Seoul",year:"numeric",month:"2-digit",day:"2-digit"
-  }).formatToParts(d);
-  const m = Object.fromEntries(parts.map(p => [p.type, p.value]));
-  return `${m.year}-${m.month}-${m.day}`;
+async function edge(action, payload={}){
+  const r = await fetch(EDGE_URL, {
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "apikey":SUPABASE_KEY,
+      "Authorization":`Bearer ${SUPABASE_KEY}`
+    },
+    body:JSON.stringify({action,...payload})
+  });
+  const data = await r.json().catch(()=>({error:`HTTP ${r.status}`}));
+  if(!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
 }
 
-function firstDayOfMonth(){
-  const t = kstDate();
-  return `${t.slice(0,7)}-01`;
+function copyText(text, btn){
+  navigator.clipboard.writeText(text).then(()=>{
+    const old = btn.textContent;
+    btn.textContent = "복사됨";
+    setTimeout(()=>btn.textContent=old,1000);
+  });
+}
+
+async function renderEnrollment(token){
+  app.innerHTML = `
+    <div class="badge">Passkey 등록</div>
+    <h1>출결 기기 등록</h1>
+    <p class="sub">이 휴대폰을 본인 출결 기기로 등록합니다.</p>
+    <div id="enrollBody"><div class="result">등록 정보를 확인하는 중...</div></div>`;
+
+  const body = document.getElementById("enrollBody");
+  try{
+    if(!window.SimpleWebAuthnBrowser?.browserSupportsWebAuthn()){
+      throw new Error("이 브라우저는 Passkey/WebAuthn을 지원하지 않습니다.");
+    }
+    const data = await edge("registration-options",{token});
+    body.innerHTML = `
+      <div class="hero-name">${esc(data.memberName)}</div>
+      <p>아래 버튼을 누르면 휴대폰의 Face ID / 지문 / 화면 잠금으로 Passkey를 저장합니다.</p>
+      <button id="registerPasskey" class="btn btn-admin">이 휴대폰 등록</button>
+      <div id="enrollResult"></div>`;
+    document.getElementById("registerPasskey").onclick = async ()=>{
+      const btn = document.getElementById("registerPasskey");
+      btn.disabled = true;
+      try{
+        const response = await SimpleWebAuthnBrowser.startRegistration({optionsJSON:data.options});
+        await edge("registration-verify",{token,response});
+        body.innerHTML = `
+          <div class="success-big">등록 완료</div>
+          <p>${esc(data.memberName)}님의 Passkey가 이 기기에 등록됐습니다.</p>
+          <p class="hint">이제 현장 태블릿의 동적 QR을 찍으면 바로 출결할 수 있습니다.</p>`;
+      }catch(e){
+        btn.disabled = false;
+        document.getElementById("enrollResult").innerHTML = `<div class="result error">${esc(e.message)}</div>`;
+      }
+    };
+  }catch(e){
+    body.innerHTML = `<div class="result error">${esc(e.message)}</div>`;
+  }
+}
+
+async function renderAttendance(token){
+  app.innerHTML = `
+    <div class="badge">현장 출결</div>
+    <h1>본인 확인</h1>
+    <p class="sub">등록된 Passkey로 출결을 승인합니다.</p>
+    <div id="attendBody"><div class="result">QR을 확인하는 중...</div></div>`;
+
+  const body = document.getElementById("attendBody");
+  try{
+    if(!window.SimpleWebAuthnBrowser?.browserSupportsWebAuthn()){
+      throw new Error("이 브라우저는 Passkey/WebAuthn을 지원하지 않습니다.");
+    }
+    const data = await edge("authentication-options",{attendanceToken:token});
+    const label = data.mode === "out" ? "퇴근" : "출근";
+    body.innerHTML = `
+      <div class="mode-badge ${data.mode}">${label}</div>
+      <button id="authPasskey" class="btn ${data.mode==="out"?"btn-out":"btn-in"}">${label} 인증</button>
+      <p class="hint">Face ID·지문 등은 휴대폰에서만 처리되며 출결 시스템으로 전송되지 않습니다.</p>
+      <div id="attendResult"></div>`;
+    document.getElementById("authPasskey").onclick = async ()=>{
+      const btn = document.getElementById("authPasskey");
+      btn.disabled = true;
+      try{
+        const response = await SimpleWebAuthnBrowser.startAuthentication({optionsJSON:data.options});
+        const verified = await edge("authentication-verify",{attendanceToken:token,response});
+        const a = verified.attendance;
+        const duplicate = a?.already_recorded;
+        body.innerHTML = `
+          <div class="success-big">${esc(a?.member_name || "")} ${label} ${duplicate ? "확인" : "완료"}</div>
+          <div class="success-time">${fmtTime(a?.scanned_at)}</div>
+          ${duplicate ? '<p class="hint">오늘 최초 기록 시간이 유지됩니다.</p>' : ''}`;
+      }catch(e){
+        btn.disabled = false;
+        document.getElementById("attendResult").innerHTML = `<div class="result error">${esc(e.message)}</div>`;
+      }
+    };
+  }catch(e){
+    body.innerHTML = `<div class="result error">${e.message.includes("expired") ? "QR 유효시간이 지났습니다. 태블릿의 새 QR을 다시 찍어주세요." : esc(e.message)}</div>`;
+  }
+}
+
+async function renderKiosk(){
+  app.innerHTML = `
+    <div class="badge">태블릿 키오스크</div>
+    <h1>현장 출결 QR</h1>
+    <div id="kioskLogin">
+      <p class="sub">처음 한 번만 관리자 PIN으로 키오스크를 시작합니다.</p>
+      <div class="field"><label>관리자 PIN</label><input id="kioskPin" type="password" inputmode="numeric"></div>
+      <button id="kioskStart" class="btn btn-admin">키오스크 시작</button>
+      <div id="kioskError"></div>
+    </div>
+    <div id="kioskPanel" class="hidden">
+      <div class="mode-switch">
+        <button id="modeIn" class="mode-btn active in">출근</button>
+        <button id="modeOut" class="mode-btn out">퇴근</button>
+      </div>
+      <div id="kioskModeTitle" class="kiosk-title">출근 QR</div>
+      <div id="dynamicQr" class="dynamic-qr"></div>
+      <div class="countdown"><b id="countdown">-</b>초 후 QR 갱신</div>
+      <p class="hint center">학생은 자기 휴대폰 카메라로 이 QR을 찍고 Passkey로 승인합니다.</p>
+      <div class="kiosk-links"><a href="?admin=1">관리자 페이지</a></div>
+    </div>`;
+
+  let kioskToken = "";
+  let mode = "in";
+  let expiresAt = 0;
+  let refreshTimer = null;
+  let countdownTimer = null;
+
+  async function refreshQr(){
+    if(!kioskToken) return;
+    try{
+      const data = await edge("kiosk-challenge",{kioskToken,mode});
+      expiresAt = new Date(data.expiresAt).getTime();
+      const qr = document.getElementById("dynamicQr");
+      qr.innerHTML = "";
+      new QRCode(qr,{text:data.url,width:300,height:300,correctLevel:QRCode.CorrectLevel.M});
+    }catch(e){
+      document.getElementById("dynamicQr").innerHTML = `<div class="result error">${esc(e.message)}</div>`;
+    }
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(refreshQr, 13000);
+  }
+  function startCountdown(){
+    clearInterval(countdownTimer);
+    countdownTimer = setInterval(()=>{
+      const left = Math.max(0, Math.ceil((expiresAt-Date.now())/1000));
+      const el = document.getElementById("countdown");
+      if(el) el.textContent = left;
+    },250);
+  }
+  async function switchMode(next){
+    mode = next;
+    document.getElementById("modeIn").classList.toggle("active",mode==="in");
+    document.getElementById("modeOut").classList.toggle("active",mode==="out");
+    document.getElementById("kioskModeTitle").textContent = mode==="in" ? "출근 QR" : "퇴근 QR";
+    clearTimeout(refreshTimer);
+    await refreshQr();
+  }
+
+  document.getElementById("kioskStart").onclick = async ()=>{
+    const pin = document.getElementById("kioskPin").value.trim();
+    try{
+      const data = await edge("kiosk-login",{adminPin:pin});
+      kioskToken = data.token;
+      sessionStorage.setItem("attendanceKioskToken",kioskToken);
+      document.getElementById("kioskLogin").classList.add("hidden");
+      document.getElementById("kioskPanel").classList.remove("hidden");
+      startCountdown();
+      await refreshQr();
+    }catch(e){
+      document.getElementById("kioskError").innerHTML = `<div class="result error">관리자 PIN을 확인하세요.</div>`;
+    }
+  };
+  document.getElementById("modeIn").onclick = ()=>switchMode("in");
+  document.getElementById("modeOut").onclick = ()=>switchMode("out");
+
+  const saved = sessionStorage.getItem("attendanceKioskToken");
+  if(saved){
+    kioskToken = saved;
+    try{
+      await edge("kiosk-challenge",{kioskToken,mode});
+      document.getElementById("kioskLogin").classList.add("hidden");
+      document.getElementById("kioskPanel").classList.remove("hidden");
+      startCountdown();
+      await refreshQr();
+    }catch{
+      sessionStorage.removeItem("attendanceKioskToken");
+      kioskToken = "";
+    }
+  }
 }
 
 function downloadCsv(rows){
-  const header = ["날짜","이름","출근","출근상태","퇴근","퇴근상태"];
-  const lines = [header];
+  const lines = [["날짜","이름","출근","출근상태","퇴근","퇴근상태"]];
   for(const r of rows){
     lines.push([
-      r.work_date,
-      r.member_name,
-      r.check_in ? fmt(r.check_in) : "",
-      r.check_in ? (hhmm(r.check_in) > "10:00" ? "지각" : "정상") : "미출근",
-      r.check_out ? fmt(r.check_out) : "",
-      r.check_out ? (hhmm(r.check_out) < "17:00" ? "조퇴" : "정상") : "미퇴근"
+      r.work_date,r.member_name,
+      r.check_in?fmt(r.check_in):"",
+      r.check_in?(hhmm(r.check_in)>"10:00"?"지각":"정상"):"미출근",
+      r.check_out?fmt(r.check_out):"",
+      r.check_out?(hhmm(r.check_out)<"17:00"?"조퇴":"정상"):"미퇴근"
     ]);
   }
-  const csv = "\uFEFF" + lines.map(row =>
-    row.map(v => `"${String(v ?? "").replaceAll('"','""')}"`).join(",")
-  ).join("\r\n");
-  const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `출결내역_${document.getElementById("fromDate").value}_${document.getElementById("toDate").value}.csv`;
-  a.click();
+  const csv="\uFEFF"+lines.map(row=>row.map(v=>`"${String(v??"").replaceAll('"','""')}"`).join(",")).join("\r\n");
+  const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob), a=document.createElement("a");
+  a.href=url;a.download=`출결내역_${document.getElementById("fromDate").value}_${document.getElementById("toDate").value}.csv`;a.click();
   URL.revokeObjectURL(url);
-}
-
-async function renderScan(){
-  const type = mode === "out" ? "out" : "in";
-  const title = type === "in" ? "출근 체크" : "퇴근 체크";
-  const buttonClass = type === "in" ? "btn-in" : "btn-out";
-
-  app.innerHTML = `
-    <div class="badge">${type === "in" ? "출근 QR" : "퇴근 QR"}</div>
-    <h1>${title}</h1>
-    <p class="sub">이름을 선택하고 개인 PIN을 입력하세요.</p>
-    <div class="field"><label>이름</label><select id="member"><option>불러오는 중...</option></select></div>
-    <div class="field"><label>PIN</label><input id="pin" type="password" inputmode="numeric" maxlength="12" placeholder="PIN 입력"></div>
-    <button id="submit" class="btn ${buttonClass}">${type === "in" ? "출근 기록" : "퇴근 기록"}</button>
-    <div id="result"></div>
-    <div class="nav"><a href="?admin=1">관리자</a></div>
-  `;
-
-  const {data, error} = await db.rpc("list_members");
-  const select = document.getElementById("member");
-  if(error){
-    select.innerHTML = "<option>명단 조회 실패</option>";
-    document.getElementById("result").innerHTML = `<div class="result error">${esc(error.message)}</div>`;
-    return;
-  }
-  select.innerHTML = data.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join("");
-
-  document.getElementById("submit").onclick = async () => {
-    const pin = document.getElementById("pin").value.trim();
-    const memberId = select.value;
-    if(!pin) return;
-    const btn = document.getElementById("submit");
-    btn.disabled = true;
-    btn.textContent = "처리 중...";
-
-    const {data: rows, error: err} = await db.rpc("record_attendance",{
-      p_member_id: memberId, p_pin: pin, p_type: type
-    });
-
-    btn.disabled = false;
-    btn.textContent = type === "in" ? "출근 기록" : "퇴근 기록";
-
-    if(err){
-      document.getElementById("result").innerHTML =
-        `<div class="result error">PIN이 틀렸거나 처리에 실패했습니다.</div>`;
-      return;
-    }
-
-    const r = rows?.[0];
-    const label = type === "in" ? "출근" : "퇴근";
-    document.getElementById("result").innerHTML = `
-      <div class="result">
-        <div class="ok">${esc(r.member_name)} · ${label} ${r.already_recorded ? "이미 기록됨" : "완료"}</div>
-        <div>${fmt(r.scanned_at)}</div>
-        <div>${type === "in" ? statusIn(r.scanned_at) : statusOut(r.scanned_at)}</div>
-        ${r.already_recorded ? "<div>오늘 최초 기록 시간이 유지됩니다.</div>" : ""}
-      </div>`;
-  };
 }
 
 async function renderAdmin(){
   const today = kstDate();
-
   app.innerHTML = `
     <div class="badge">관리자</div>
-    <h1>QR 출결 관리자</h1>
-    <p class="sub">학생 관리 · QR · 전체 출결 내역</p>
+    <h1>출결 관리자</h1>
+    <p class="sub">학생 · Passkey · 키오스크 · 전체 출결</p>
 
     <div class="login-row">
-      <div class="field grow">
-        <label>관리자 PIN</label>
-        <input id="adminPin" type="password" inputmode="numeric" placeholder="관리자 PIN">
-      </div>
+      <div class="field grow"><label>관리자 PIN</label><input id="adminPin" type="password" inputmode="numeric"></div>
       <button id="unlock" class="btn btn-admin compact">관리 시작</button>
     </div>
-
     <div id="adminError"></div>
 
     <div id="adminPanel" class="hidden">
       <div class="tabs">
         <button class="tab active" data-tab="today">오늘 출결</button>
         <button class="tab" data-tab="members">학생 관리</button>
-        <button class="tab" data-tab="qr">QR 코드</button>
+        <button class="tab" data-tab="passkeys">Passkey</button>
         <button class="tab" data-tab="history">전체 내역</button>
       </div>
 
       <section id="tab-today" class="tab-panel">
-        <div class="section-head">
-          <h2>오늘 출결</h2>
-          <input id="todayDate" type="date" value="${today}">
-        </div>
+        <div class="section-head"><h2>오늘 출결</h2><input id="todayDate" type="date" value="${today}"></div>
+        <div class="kiosk-launch"><a class="btn-link kiosk" href="?kiosk=1" target="_blank">태블릿 키오스크 열기</a></div>
         <div id="todayResult"></div>
       </section>
 
@@ -183,30 +287,17 @@ async function renderAdmin(){
         <div class="section-head"><h2>학생 관리</h2></div>
         <div class="member-add">
           <input id="newName" placeholder="학생 이름">
-          <input id="newPin" placeholder="PIN (4자리 이상)" inputmode="numeric">
+          <input id="newPin" placeholder="관리용 임시 PIN (4자리 이상)" inputmode="numeric">
           <button id="addMember" class="btn btn-admin compact">학생 추가</button>
         </div>
-        <p class="hint">기존 학생의 PIN은 빈칸으로 저장하면 유지됩니다.</p>
+        <p class="hint">출결에는 학생 PIN을 사용하지 않습니다. 기존 관리 호환용으로만 남겨둡니다.</p>
         <div id="memberResult"></div>
       </section>
 
-      <section id="tab-qr" class="tab-panel hidden">
-        <div class="section-head"><h2>고정 QR 코드</h2></div>
-        <div class="qr-grid">
-          <div class="qr-card">
-            <h3>출근 QR</h3>
-            <div id="qrIn" class="qr-box"></div>
-            <div class="qr-url">${esc(BASE_URL)}?mode=in</div>
-            <a class="btn-link in" href="${esc(BASE_URL)}?mode=in" target="_blank">출근 페이지 열기</a>
-          </div>
-          <div class="qr-card">
-            <h3>퇴근 QR</h3>
-            <div id="qrOut" class="qr-box"></div>
-            <div class="qr-url">${esc(BASE_URL)}?mode=out</div>
-            <a class="btn-link out" href="${esc(BASE_URL)}?mode=out" target="_blank">퇴근 페이지 열기</a>
-          </div>
-        </div>
-        <p class="hint">이 QR은 고정입니다. 출력해서 계속 사용하면 됩니다.</p>
+      <section id="tab-passkeys" class="tab-panel hidden">
+        <div class="section-head"><h2>학생 Passkey 등록</h2></div>
+        <p class="hint">등록 링크는 10분간 유효합니다. 해당 학생의 휴대폰에서 링크를 열고 기기 인증을 완료하세요.</p>
+        <div id="passkeyResult"></div>
       </section>
 
       <section id="tab-history" class="tab-panel hidden">
@@ -217,182 +308,147 @@ async function renderAdmin(){
           <button id="loadHistory" class="btn btn-admin compact">조회</button>
           <button id="downloadCsv" class="btn btn-secondary compact" disabled>CSV 다운로드</button>
         </div>
-        <div id="historySummary"></div>
         <div id="historyResult"></div>
       </section>
     </div>
+    <div class="nav"><a href="?kiosk=1">키오스크</a></div>`;
 
-    <div class="nav"><a href="?mode=in">출근 화면</a><a href="?mode=out">퇴근 화면</a></div>
-  `;
-
-  let adminPin = "";
-  let historyRows = [];
-
-  function showError(msg){
-    document.getElementById("adminError").innerHTML = msg
-      ? `<div class="result error">${esc(msg)}</div>` : "";
-  }
+  let adminPin="", historyRows=[];
 
   async function loadToday(){
-    const date = document.getElementById("todayDate").value;
-    const {data, error} = await db.rpc("admin_attendance",{p_date:date,p_admin_pin:adminPin});
-    const el = document.getElementById("todayResult");
-    if(error){
-      el.innerHTML = `<div class="result error">조회 실패: ${esc(error.message)}</div>`;
-      return;
-    }
-    el.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>이름</th><th>출근</th><th>상태</th><th>퇴근</th><th>상태</th></tr></thead>
-      <tbody>${data.map(r => `<tr>
-        <td>${esc(r.member_name)}</td>
-        <td>${fmtTime(r.check_in)}</td><td>${statusIn(r.check_in)}</td>
-        <td>${fmtTime(r.check_out)}</td><td>${statusOut(r.check_out)}</td>
-      </tr>`).join("")}</tbody></table></div>`;
+    const {data,error}=await db.rpc("admin_attendance",{p_date:document.getElementById("todayDate").value,p_admin_pin:adminPin});
+    const el=document.getElementById("todayResult");
+    if(error){el.innerHTML=`<div class="result error">${esc(error.message)}</div>`;return;}
+    el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>이름</th><th>출근</th><th>상태</th><th>퇴근</th><th>상태</th></tr></thead><tbody>${
+      data.map(r=>`<tr><td>${esc(r.member_name)}</td><td>${fmtTime(r.check_in)}</td><td>${statusIn(r.check_in)}</td><td>${fmtTime(r.check_out)}</td><td>${statusOut(r.check_out)}</td></tr>`).join("")
+    }</tbody></table></div>`;
   }
 
   async function loadMembers(){
-    const {data, error} = await db.rpc("admin_list_members",{p_admin_pin:adminPin});
-    const el = document.getElementById("memberResult");
-    if(error){
-      el.innerHTML = `<div class="result error">학생 조회 실패: ${esc(error.message)}</div>`;
-      return;
-    }
-
-    el.innerHTML = `<div class="member-list">${data.map(m => `
+    const {data,error}=await db.rpc("admin_list_members",{p_admin_pin:adminPin});
+    const el=document.getElementById("memberResult");
+    if(error){el.innerHTML=`<div class="result error">${esc(error.message)}</div>`;return;}
+    el.innerHTML=`<div class="member-list">${data.map(m=>`
       <div class="member-row" data-id="${m.member_id}">
         <input class="member-name" value="${esc(m.member_name)}">
-        <input class="member-pin" placeholder="새 PIN (변경시에만)">
-        <label class="switch-label"><input class="member-active" type="checkbox" ${m.active ? "checked" : ""}> 사용</label>
+        <input class="member-pin" placeholder="관리용 PIN 변경시에만">
+        <label class="switch-label"><input class="member-active" type="checkbox" ${m.active?"checked":""}> 사용</label>
         <button class="save-member btn btn-secondary compact">저장</button>
       </div>`).join("")}</div>`;
-
-    document.querySelectorAll(".save-member").forEach(btn => {
-      btn.onclick = async () => {
-        const row = btn.closest(".member-row");
-        const {error} = await db.rpc("admin_upsert_member",{
-          p_admin_pin: adminPin,
-          p_member_id: row.dataset.id,
-          p_name: row.querySelector(".member-name").value.trim(),
-          p_pin: row.querySelector(".member-pin").value.trim() || null,
-          p_active: row.querySelector(".member-active").checked
-        });
-        if(error){
-          alert(`저장 실패: ${error.message}`);
-          return;
-        }
-        row.querySelector(".member-pin").value = "";
-        btn.textContent = "저장됨";
-        setTimeout(()=>btn.textContent="저장",900);
-      };
+    document.querySelectorAll(".save-member").forEach(btn=>btn.onclick=async()=>{
+      const row=btn.closest(".member-row");
+      const {error}=await db.rpc("admin_upsert_member",{
+        p_admin_pin:adminPin,p_member_id:row.dataset.id,
+        p_name:row.querySelector(".member-name").value.trim(),
+        p_pin:row.querySelector(".member-pin").value.trim()||null,
+        p_active:row.querySelector(".member-active").checked
+      });
+      if(error)return alert(error.message);
+      row.querySelector(".member-pin").value="";
+      btn.textContent="저장됨";setTimeout(()=>btn.textContent="저장",900);
     });
+  }
+
+  async function loadPasskeys(){
+    const el=document.getElementById("passkeyResult");
+    try{
+      const data=await edge("member-passkey-status",{adminPin});
+      el.innerHTML=`<div class="passkey-list">${data.members.map(m=>{
+        const keys=m.member_passkeys||[];
+        return `<div class="passkey-row" data-id="${m.id}">
+          <div><b>${esc(m.name)}</b><div class="hint">${keys.length ? `등록 기기 ${keys.length}개` : "미등록"}</div></div>
+          <div class="passkey-actions">
+            <button class="enroll-key btn btn-admin compact">등록 링크</button>
+            ${keys.length?'<button class="revoke-key btn btn-danger compact">등록 해제</button>':""}
+          </div>
+          <div class="enroll-link"></div>
+        </div>`;
+      }).join("")}</div>`;
+
+      document.querySelectorAll(".enroll-key").forEach(btn=>btn.onclick=async()=>{
+        const row=btn.closest(".passkey-row");
+        try{
+          const d=await edge("create-enrollment",{adminPin,memberId:row.dataset.id});
+          row.querySelector(".enroll-link").innerHTML=`
+            <div class="link-box">
+              <input value="${esc(d.url)}" readonly>
+              <button class="copy-link btn btn-secondary compact">복사</button>
+              <a class="btn-link kiosk" href="${esc(d.url)}" target="_blank">열기</a>
+            </div>
+            <div class="hint">10분 후 만료</div>`;
+          row.querySelector(".copy-link").onclick=(e)=>copyText(d.url,e.currentTarget);
+        }catch(e){alert(e.message);}
+      });
+      document.querySelectorAll(".revoke-key").forEach(btn=>btn.onclick=async()=>{
+        if(!confirm("이 학생의 등록된 Passkey를 전부 해제할까요?"))return;
+        const row=btn.closest(".passkey-row");
+        try{await edge("revoke-passkeys",{adminPin,memberId:row.dataset.id});await loadPasskeys();}
+        catch(e){alert(e.message);}
+      });
+    }catch(e){el.innerHTML=`<div class="result error">${esc(e.message)}</div>`;}
   }
 
   async function loadHistory(){
-    const from = document.getElementById("fromDate").value;
-    const to = document.getElementById("toDate").value;
-    const {data, error} = await db.rpc("admin_attendance_range",{
-      p_from:from,p_to:to,p_admin_pin:adminPin
-    });
-
-    const el = document.getElementById("historyResult");
-    if(error){
-      el.innerHTML = `<div class="result error">전체 내역 조회 실패: ${esc(error.message)}</div>`;
-      document.getElementById("downloadCsv").disabled = true;
-      return;
-    }
-
-    historyRows = data || [];
-    const present = historyRows.filter(r=>r.check_in).length;
-    const late = historyRows.filter(r=>r.check_in && hhmm(r.check_in) > "10:00").length;
-    const early = historyRows.filter(r=>r.check_out && hhmm(r.check_out) < "17:00").length;
-    const absent = historyRows.filter(r=>!r.check_in).length;
-
-    document.getElementById("historySummary").innerHTML = `
-      <div class="summary-grid">
-        <div><b>${present}</b><span>출근</span></div>
-        <div><b>${late}</b><span>지각</span></div>
-        <div><b>${early}</b><span>조퇴</span></div>
-        <div><b>${absent}</b><span>미출근</span></div>
-      </div>`;
-
-    el.innerHTML = `<div class="table-wrap history-table"><table>
-      <thead><tr><th>날짜</th><th>이름</th><th>출근</th><th>출근상태</th><th>퇴근</th><th>퇴근상태</th></tr></thead>
-      <tbody>${historyRows.map(r=>`<tr>
-        <td>${esc(r.work_date)}</td><td>${esc(r.member_name)}</td>
-        <td>${fmtTime(r.check_in)}</td><td>${statusIn(r.check_in)}</td>
-        <td>${fmtTime(r.check_out)}</td><td>${statusOut(r.check_out)}</td>
-      </tr>`).join("")}</tbody></table></div>`;
-
-    document.getElementById("downloadCsv").disabled = historyRows.length === 0;
+    const from=document.getElementById("fromDate").value,to=document.getElementById("toDate").value;
+    const {data,error}=await db.rpc("admin_attendance_range",{p_from:from,p_to:to,p_admin_pin:adminPin});
+    const el=document.getElementById("historyResult");
+    if(error){el.innerHTML=`<div class="result error">${esc(error.message)}</div>`;return;}
+    historyRows=data||[];
+    el.innerHTML=`<div class="table-wrap history-table"><table><thead><tr><th>날짜</th><th>이름</th><th>출근</th><th>상태</th><th>퇴근</th><th>상태</th></tr></thead><tbody>${
+      historyRows.map(r=>`<tr><td>${esc(r.work_date)}</td><td>${esc(r.member_name)}</td><td>${fmtTime(r.check_in)}</td><td>${statusIn(r.check_in)}</td><td>${fmtTime(r.check_out)}</td><td>${statusOut(r.check_out)}</td></tr>`).join("")
+    }</tbody></table></div>`;
+    document.getElementById("downloadCsv").disabled=!historyRows.length;
   }
 
-  function makeQr(){
-    document.getElementById("qrIn").innerHTML = "";
-    document.getElementById("qrOut").innerHTML = "";
-    new QRCode(document.getElementById("qrIn"), {
-      text: `${BASE_URL}?mode=in`, width:220, height:220,
-      correctLevel: QRCode.CorrectLevel.H
-    });
-    new QRCode(document.getElementById("qrOut"), {
-      text: `${BASE_URL}?mode=out`, width:220, height:220,
-      correctLevel: QRCode.CorrectLevel.H
-    });
-  }
-
-  document.getElementById("unlock").onclick = async () => {
-    adminPin = document.getElementById("adminPin").value.trim();
-    if(!adminPin) return;
-    const {error} = await db.rpc("admin_list_members",{p_admin_pin:adminPin});
-    if(error){
-      showError("관리자 PIN이 틀렸습니다.");
-      return;
-    }
-    showError("");
+  document.getElementById("unlock").onclick=async()=>{
+    adminPin=document.getElementById("adminPin").value.trim();
+    const {error}=await db.rpc("admin_list_members",{p_admin_pin:adminPin});
+    if(error){document.getElementById("adminError").innerHTML='<div class="result error">관리자 PIN을 확인하세요.</div>';return;}
     document.getElementById("adminPanel").classList.remove("hidden");
-    document.getElementById("adminPin").disabled = true;
-    document.getElementById("unlock").disabled = true;
-    document.getElementById("unlock").textContent = "인증됨";
+    document.getElementById("adminPin").disabled=true;
+    document.getElementById("unlock").disabled=true;
+    document.getElementById("unlock").textContent="인증됨";
     await loadToday();
   };
-
-  document.querySelectorAll(".tab").forEach(tab => {
-    tab.onclick = async () => {
-      document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
-      document.querySelectorAll(".tab-panel").forEach(p=>p.classList.add("hidden"));
-      tab.classList.add("active");
-      document.getElementById(`tab-${tab.dataset.tab}`).classList.remove("hidden");
-
-      if(tab.dataset.tab === "today") await loadToday();
-      if(tab.dataset.tab === "members") await loadMembers();
-      if(tab.dataset.tab === "qr") makeQr();
-      if(tab.dataset.tab === "history") await loadHistory();
-    };
+  document.querySelectorAll(".tab").forEach(tab=>tab.onclick=async()=>{
+    document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach(x=>x.classList.add("hidden"));
+    tab.classList.add("active");
+    document.getElementById(`tab-${tab.dataset.tab}`).classList.remove("hidden");
+    if(tab.dataset.tab==="today")await loadToday();
+    if(tab.dataset.tab==="members")await loadMembers();
+    if(tab.dataset.tab==="passkeys")await loadPasskeys();
+    if(tab.dataset.tab==="history")await loadHistory();
   });
-
-  document.getElementById("todayDate").onchange = loadToday;
-
-  document.getElementById("addMember").onclick = async () => {
-    const name = document.getElementById("newName").value.trim();
-    const pin = document.getElementById("newPin").value.trim();
-    if(!name || pin.length < 4){
-      alert("이름과 4자리 이상의 PIN을 입력하세요.");
-      return;
-    }
-    const {error} = await db.rpc("admin_upsert_member",{
-      p_admin_pin:adminPin,p_member_id:null,p_name:name,p_pin:pin,p_active:true
-    });
-    if(error){
-      alert(`학생 추가 실패: ${error.message}`);
-      return;
-    }
-    document.getElementById("newName").value = "";
-    document.getElementById("newPin").value = "";
+  document.getElementById("todayDate").onchange=loadToday;
+  document.getElementById("addMember").onclick=async()=>{
+    const name=document.getElementById("newName").value.trim();
+    const pin=document.getElementById("newPin").value.trim();
+    if(!name||pin.length<4)return alert("이름과 4자리 이상의 관리용 PIN을 입력하세요.");
+    const {error}=await db.rpc("admin_upsert_member",{p_admin_pin:adminPin,p_member_id:null,p_name:name,p_pin:pin,p_active:true});
+    if(error)return alert(error.message);
+    document.getElementById("newName").value="";document.getElementById("newPin").value="";
     await loadMembers();
   };
-
-  document.getElementById("loadHistory").onclick = loadHistory;
-  document.getElementById("downloadCsv").onclick = () => downloadCsv(historyRows);
+  document.getElementById("loadHistory").onclick=loadHistory;
+  document.getElementById("downloadCsv").onclick=()=>downloadCsv(historyRows);
 }
 
-if(isAdmin) renderAdmin();
-else renderScan();
+function renderHome(){
+  app.innerHTML=`
+    <div class="badge">출결 시스템</div>
+    <h1>Passkey 출결</h1>
+    <p class="sub">태블릿 키오스크의 동적 QR을 이용하세요.</p>
+    <div class="home-actions">
+      <a class="btn-link kiosk large" href="?kiosk=1">태블릿 키오스크</a>
+      <a class="btn-link admin-link large" href="?admin=1">관리자</a>
+    </div>`;
+}
+
+const enroll=params.get("enroll");
+const attend=params.get("attend");
+if(enroll) renderEnrollment(enroll);
+else if(attend) renderAttendance(attend);
+else if(params.has("kiosk")) renderKiosk();
+else if(params.has("admin")) renderAdmin();
+else renderHome();
